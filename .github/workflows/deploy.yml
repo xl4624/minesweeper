@@ -1,0 +1,32 @@
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Don't let two pushes deploy concurrently.
+# Newer pushes wait, not cancel, so each commit gets to land.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SSH and bootstrap
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            curl -fsSL "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/deploy/bootstrap.sh" -o /tmp/bootstrap.sh
+            sudo DOMAIN="xl4624-mines.duckdns.org" \
+                 REPO_URL="${{ github.server_url }}/${{ github.repository }}.git" \
+                 PROFILE_URL="${{ github.server_url }}/${{ github.repository_owner }}" \
+                 bash /tmp/bootstrap.sh
