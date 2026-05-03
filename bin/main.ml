@@ -293,6 +293,12 @@ module Game = struct
         save_locked t))
   ;;
 
+  let count_flags g =
+    let n = ref 0 in
+    Array.iter (fun row -> Array.iter (fun c -> if c.flagged then incr n) row) g;
+    !n
+  ;;
+
   (* Caller holds the mutex. Toggle flag on a covered cell. *)
   let flag_locked t r c =
     maybe_restart t;
@@ -303,6 +309,8 @@ module Game = struct
     else (
       let cell = t.grid.(r).(c) in
       if cell.revealed
+      then ()
+      else if (not cell.flagged) && count_flags t.grid >= n_mines
       then ()
       else (
         cell.flagged <- not cell.flagged;
