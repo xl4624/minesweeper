@@ -331,14 +331,14 @@ module Game = struct
     match t.status with
     | Active -> if cell.revealed then n () else if cell.flagged then "flag" else "covered"
     | Lost ->
-      if cell.mine && cell.revealed
+      if cell.revealed && cell.mine
       then "mine_exploded"
+      else if cell.revealed
+      then n ()
       else if cell.flagged
       then "flag"
       else if cell.mine
       then "mine"
-      else if cell.revealed
-      then n ()
       else "covered"
     | Won -> if cell.mine then "flag" else n ()
   ;;
