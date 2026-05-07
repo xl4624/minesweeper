@@ -12,6 +12,8 @@ Environment=STATE_FILE=__STATE_DIR__/state.bin
 Environment=ASSETS_DIR=__APP_DIR__/assets
 Environment=PORT=__PORT__
 Environment=MIN_CLICK_INTERVAL_S=__MIN_CLICK_INTERVAL_S__
+Environment=LOG_FILE=__STATE_DIR__/mines.log
+Environment=LOG_MAX_BYTES=__LOG_MAX_BYTES__
 ExecStart=__APP_DIR__/_build/default/bin/main.exe
 Restart=always
 RestartSec=2

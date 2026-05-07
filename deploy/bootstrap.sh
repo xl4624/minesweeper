@@ -9,6 +9,7 @@
 #   OCAML_VERSION=5.4.1                                 (default)
 #   PORT=8080                                           (default)
 #   MIN_CLICK_INTERVAL_S=1.0                            (default)
+#   LOG_MAX_BYTES=1000000                               (default, ~1MB)
 
 set -euo pipefail
 
@@ -18,6 +19,7 @@ PROFILE_URL="${PROFILE_URL:?Set PROFILE_URL env}"
 OCAML_VERSION="${OCAML_VERSION:-5.4.1}"
 PORT="${PORT:-8080}"
 MIN_CLICK_INTERVAL_S="${MIN_CLICK_INTERVAL_S:-1.0}"
+LOG_MAX_BYTES="${LOG_MAX_BYTES:-1000000}"
 
 APP_DIR=/opt/minesweeper
 STATE_DIR=/var/lib/minesweeper
@@ -101,6 +103,7 @@ sed -i \
   -e "s|__PROFILE_URL__|$PROFILE_URL|g" \
   -e "s|__PORT__|$PORT|g" \
   -e "s|__MIN_CLICK_INTERVAL_S__|$MIN_CLICK_INTERVAL_S|g" \
+  -e "s|__LOG_MAX_BYTES__|$LOG_MAX_BYTES|g" \
   /etc/systemd/system/minesweeper.service
 chmod a+rX "$APP_DIR" "$APP_DIR/_build" "$APP_DIR/_build/default" \
            "$APP_DIR/_build/default/bin"

@@ -34,6 +34,18 @@ let min_click_interval_s =
   | None -> 1.0
 ;;
 
+let log_file =
+  match Sys.getenv_opt "LOG_FILE" with
+  | Some f -> f
+  | None -> "mines.log"
+;;
+
+let log_max_bytes =
+  match Sys.getenv_opt "LOG_MAX_BYTES" with
+  | Some s -> int_of_string s
+  | None -> 1_000_000
+;;
+
 module Rate_limit = struct
   type t =
     { last_click : (string, float) Hashtbl.t
@@ -57,6 +69,68 @@ module Rate_limit = struct
          | _ ->
            Hashtbl.replace t.last_click ip now;
            true)
+  ;;
+end
+
+(* Append-only log with size cap. When the active file passes [max_bytes],
+   it is renamed to [<path>.old] (overwriting any prior .old) and a fresh
+   file is opened. Total on-disk usage is therefore bounded by ~2*max_bytes. *)
+module Logger = struct
+  type t =
+    { path : string
+    ; max_bytes : int
+    ; mutable oc : out_channel
+    ; mutable bytes : int
+    ; mutex : Mutex.t
+    }
+
+  let open_append path =
+    let oc = open_out_gen [ Open_wronly; Open_append; Open_creat ] 0o644 path in
+    let bytes = try (Unix.stat path).st_size with _ -> 0 in
+    oc, bytes
+  ;;
+
+  let create ~path ~max_bytes =
+    let oc, bytes = open_append path in
+    { path; max_bytes; oc; bytes; mutex = Mutex.create () }
+  ;;
+
+  let rotate_locked t =
+    close_out_noerr t.oc;
+    (try Sys.rename t.path (t.path ^ ".old") with _ -> ());
+    let oc, bytes = open_append t.path in
+    t.oc <- oc;
+    t.bytes <- bytes
+  ;;
+
+  let log t fmt =
+    Printf.ksprintf
+      (fun msg ->
+         let tm = Unix.localtime (Unix.gettimeofday ()) in
+         let line =
+           Printf.sprintf
+             "%04d-%02d-%02d %02d:%02d:%02d %s\n"
+             (tm.Unix.tm_year + 1900)
+             (tm.tm_mon + 1)
+             tm.tm_mday
+             tm.tm_hour
+             tm.tm_min
+             tm.tm_sec
+             msg
+         in
+         let len = String.length line in
+         Mutex.lock t.mutex;
+         Fun.protect
+           ~finally:(fun () -> Mutex.unlock t.mutex)
+           (fun () ->
+              if t.bytes + len > t.max_bytes then rotate_locked t;
+              (try
+                 output_string t.oc line;
+                 flush t.oc;
+                 t.bytes <- t.bytes + len
+               with _ -> ()));
+         prerr_string line)
+      fmt
   ;;
 end
 
@@ -128,6 +202,11 @@ module Game = struct
   ;;
 
   let of_persisted state_file p =
+    (* Remove any ghost flags on revealed cells. *)
+    Array.iter
+      (fun row ->
+         Array.iter (fun c -> if c.revealed && c.flagged then c.flagged <- false) row)
+      p.p_grid;
     { grid = p.p_grid
     ; status = p.p_status
     ; started_at = p.p_started_at
@@ -231,6 +310,7 @@ module Game = struct
       if in_bounds r c && (not g.(r).(c).revealed) && not g.(r).(c).mine
       then (
         g.(r).(c).revealed <- true;
+        g.(r).(c).flagged <- false;
         if count_adjacent_mines g r c = 0
         then
           for dr = -1 to 1 do
@@ -252,9 +332,46 @@ module Game = struct
     !result
   ;;
 
-  let maybe_restart t =
+  type click_outcome =
+    | Click_hit_mine
+    | Click_won
+    | Click_revealed
+    | Click_noop_revealed
+    | Click_noop_flagged
+    | Click_noop_inactive
+    | Click_noop_bounds
+
+  type flag_outcome =
+    | Flag_on
+    | Flag_off
+    | Flag_noop_revealed
+    | Flag_noop_cap
+    | Flag_noop_inactive
+    | Flag_noop_bounds
+
+  let string_of_click_outcome = function
+    | Click_hit_mine -> "hit_mine"
+    | Click_won -> "won"
+    | Click_revealed -> "revealed"
+    | Click_noop_revealed -> "noop_revealed"
+    | Click_noop_flagged -> "noop_flagged"
+    | Click_noop_inactive -> "noop_inactive"
+    | Click_noop_bounds -> "noop_bounds"
+  ;;
+
+  let string_of_flag_outcome = function
+    | Flag_on -> "flag_on"
+    | Flag_off -> "flag_off"
+    | Flag_noop_revealed -> "noop_revealed"
+    | Flag_noop_cap -> "noop_cap"
+    | Flag_noop_inactive -> "noop_inactive"
+    | Flag_noop_bounds -> "noop_bounds"
+  ;;
+
+  (* Caller holds the mutex. Returns whether a restart was performed. *)
+  let maybe_restart_locked t =
     match t.status with
-    | Active -> ()
+    | Active -> false
     | Won | Lost ->
       if now () -. t.finished_at > restart_cooldown_s
       then (
@@ -262,35 +379,41 @@ module Game = struct
         t.status <- Active;
         t.started_at <- now ();
         t.finished_at <- 0.0;
-        save_locked t)
+        save_locked t;
+        true)
+      else false
   ;;
 
   (* Caller holds the mutex. *)
   let click_locked t r c =
-    maybe_restart t;
     if t.status <> Active
-    then ()
+    then Click_noop_inactive
     else if not (in_bounds r c)
-    then ()
+    then Click_noop_bounds
     else (
       let cell = t.grid.(r).(c) in
-      if cell.revealed || cell.flagged
-      then ()
+      if cell.revealed
+      then Click_noop_revealed
+      else if cell.flagged
+      then Click_noop_flagged
       else if cell.mine
       then (
         cell.revealed <- true;
         t.status <- Lost;
         t.finished_at <- now ();
         t.losses <- t.losses + 1;
-        save_locked t)
+        save_locked t;
+        Click_hit_mine)
       else (
         flood_fill t.grid r c;
-        if all_safe_revealed t.grid
+        let won = all_safe_revealed t.grid in
+        if won
         then (
           t.status <- Won;
           t.finished_at <- now ();
           t.wins <- t.wins + 1);
-        save_locked t))
+        save_locked t;
+        if won then Click_won else Click_revealed))
   ;;
 
   let count_flags g =
@@ -301,20 +424,20 @@ module Game = struct
 
   (* Caller holds the mutex. Toggle flag on a covered cell. *)
   let flag_locked t r c =
-    maybe_restart t;
     if t.status <> Active
-    then ()
+    then Flag_noop_inactive
     else if not (in_bounds r c)
-    then ()
+    then Flag_noop_bounds
     else (
       let cell = t.grid.(r).(c) in
       if cell.revealed
-      then ()
+      then Flag_noop_revealed
       else if (not cell.flagged) && count_flags t.grid >= n_mines
-      then ()
+      then Flag_noop_cap
       else (
         cell.flagged <- not cell.flagged;
-        save_locked t))
+        save_locked t;
+        if cell.flagged then Flag_on else Flag_off))
   ;;
 
   let with_lock t f =
@@ -322,8 +445,19 @@ module Game = struct
     Fun.protect ~finally:(fun () -> Mutex.unlock t.mutex) f
   ;;
 
-  let click t r c = with_lock t (fun () -> click_locked t r c)
-  let flag t r c = with_lock t (fun () -> flag_locked t r c)
+  let click t r c =
+    with_lock t (fun () ->
+      let restarted = maybe_restart_locked t in
+      let outcome = click_locked t r c in
+      restarted, outcome)
+  ;;
+
+  let flag t r c =
+    with_lock t (fun () ->
+      let restarted = maybe_restart_locked t in
+      let outcome = flag_locked t r c in
+      restarted, outcome)
+  ;;
 
   let sprite_for t r c =
     let cell = t.grid.(r).(c) in
@@ -451,13 +585,37 @@ let cell_handler game r c _req =
     png_response body)
 ;;
 
-let click_handler game limiter r c req =
-  if Rate_limit.allow limiter (client_ip req) then Game.click game r c;
+let click_handler game limiter logger r c req =
+  let ip = client_ip req in
+  if Rate_limit.allow limiter ip
+  then (
+    let restarted, outcome = Game.click game r c in
+    Logger.log
+      logger
+      "click ip=%s r=%d c=%d allowed restarted=%b outcome=%s"
+      ip
+      r
+      c
+      restarted
+      (Game.string_of_click_outcome outcome))
+  else Logger.log logger "click ip=%s r=%d c=%d denied=ratelimit" ip r c;
   redirect_response profile_url
 ;;
 
-let flag_handler game limiter r c req =
-  if Rate_limit.allow limiter (client_ip req) then Game.flag game r c;
+let flag_handler game limiter logger r c req =
+  let ip = client_ip req in
+  if Rate_limit.allow limiter ip
+  then (
+    let restarted, outcome = Game.flag game r c in
+    Logger.log
+      logger
+      "flag ip=%s r=%d c=%d allowed restarted=%b outcome=%s"
+      ip
+      r
+      c
+      restarted
+      (Game.string_of_flag_outcome outcome))
+  else Logger.log logger "flag ip=%s r=%d c=%d denied=ratelimit" ip r c;
   redirect_response profile_url
 ;;
 
@@ -542,18 +700,27 @@ let () =
   load_sprites ();
   let game = Game.load_or_fresh state_file in
   let limiter = Rate_limit.create ~min_interval:min_click_interval_s in
+  let logger = Logger.create ~path:log_file ~max_bytes:log_max_bytes in
+  Logger.log
+    logger
+    "startup port=%d state=%s log=%s log_max_bytes=%d min_click_interval_s=%g"
+    port
+    state_file
+    log_file
+    log_max_bytes
+    min_click_interval_s;
   let server = S.create ~port () in
   S.add_route_handler ~meth:`GET server S.Route.(return) (fun req -> index_handler req);
   S.add_route_handler
     ~meth:`GET
     server
     S.Route.(exact "click" @/ int @/ int @/ return)
-    (fun r c req -> click_handler game limiter r c req);
+    (fun r c req -> click_handler game limiter logger r c req);
   S.add_route_handler
     ~meth:`GET
     server
     S.Route.(exact "flag" @/ int @/ int @/ return)
-    (fun r c req -> flag_handler game limiter r c req);
+    (fun r c req -> flag_handler game limiter logger r c req);
   S.add_route_handler
     ~meth:`GET
     server
