@@ -50,5 +50,7 @@ test/gen/*
 .envrc
 .env
 
+logs/
+
 bench/compare_go.py
 bench/compare.json

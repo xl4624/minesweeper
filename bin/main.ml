@@ -138,9 +138,11 @@ let client_ip req =
   let headers = S.Request.headers req in
   match S.Headers.get "x-forwarded-for" headers with
   | Some xff ->
-    (* X-Forwarded-For: client, proxy1, proxy2 - first entry is the client. *)
-    (match String.split_on_char ',' xff with
-     | first :: _ -> String.trim first
+    (* Caddy appends the real peer to the right end of XFF, so the rightmost
+       entry is the IP it observed. The leftmost is whatever the client sent
+       and is spoofable. *)
+    (match List.rev (String.split_on_char ',' xff) with
+     | last :: _ -> String.trim last
      | [] -> "?")
   | None ->
     (match S.Request.client_addr req with
@@ -332,6 +334,30 @@ module Game = struct
     !result
   ;;
 
+  let any_revealed g =
+    let any = ref false in
+    Array.iter (fun row -> Array.iter (fun c -> if c.revealed then any := true) row) g;
+    !any
+  ;;
+
+  (* Move the mine at (r,c) to the first non-mine cell that isn't (r,c). *)
+  let relocate_mine g r c =
+    let moved = ref false in
+    let r' = ref 0 in
+    while (not !moved) && !r' < rows do
+      let c' = ref 0 in
+      while (not !moved) && !c' < cols do
+        if (!r' <> r || !c' <> c) && not g.(!r').(!c').mine
+        then (
+          g.(!r').(!c').mine <- true;
+          g.(r).(c).mine <- false;
+          moved := true);
+        incr c'
+      done;
+      incr r'
+    done
+  ;;
+
   type click_outcome =
     | Click_hit_mine
     | Click_won
@@ -396,14 +422,18 @@ module Game = struct
       then Click_noop_revealed
       else if cell.flagged
       then Click_noop_flagged
-      else if cell.mine
-      then (
-        cell.revealed <- true;
-        t.status <- Lost;
-        t.finished_at <- now ();
-        t.losses <- t.losses + 1;
-        save_locked t;
-        Click_hit_mine)
+      else (
+        (* First-click safe: if no cell has been revealed yet, never let
+           the player lose on move 1. Move the mine elsewhere. *)
+        if cell.mine && not (any_revealed t.grid) then relocate_mine t.grid r c;
+        if cell.mine
+        then (
+          cell.revealed <- true;
+          t.status <- Lost;
+          t.finished_at <- now ();
+          t.losses <- t.losses + 1;
+          save_locked t;
+          Click_hit_mine)
       else (
         flood_fill t.grid r c;
         let won = all_safe_revealed t.grid in
@@ -413,7 +443,7 @@ module Game = struct
           t.finished_at <- now ();
           t.wins <- t.wins + 1);
         save_locked t;
-        if won then Click_won else Click_revealed))
+        if won then Click_won else Click_revealed)))
   ;;
 
   let count_flags g =
