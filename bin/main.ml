@@ -151,9 +151,9 @@ let client_ip req =
 ;;
 
 module Game = struct
-  let rows = 9
-  let cols = 9
-  let n_mines = 10
+  let rows = 6
+  let cols = 6
+  let n_mines = 5
   let restart_cooldown_s = 0.0
 
   type cell =
@@ -190,7 +190,7 @@ module Game = struct
     ; p_losses : int
     }
 
-  let persist_version = 2
+  let persist_version = 3
 
   let to_persisted t =
     { p_version = persist_version

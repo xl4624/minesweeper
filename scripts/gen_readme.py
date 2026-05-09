@@ -10,8 +10,8 @@ import argparse
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--server", default="https://YOUR-SERVER-HERE")
-    p.add_argument("--rows", type=int, default=9)
-    p.add_argument("--cols", type=int, default=9)
+    p.add_argument("--rows", type=int, default=6)
+    p.add_argument("--cols", type=int, default=6)
     p.add_argument("--size", type=int, default=32)
     p.add_argument("--flag-height", type=int, default=14)
     args = p.parse_args()

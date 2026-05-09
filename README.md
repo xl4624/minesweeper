@@ -2,7 +2,7 @@
 
 Multiplayer minesweeper that lives in a GitHub profile README.
 
-One global game shared across all visitors. 9x9 board, 10 mines. Each cell has
+One global game shared across all visitors. 6x6 board, 5 mines. Each cell has
 a reveal link (the cell image) and a flag toggle below it. After a win or loss
 the game auto-resets on the next request that arrives more than 30s after
 game-over. Per-IP rate limit on click/flag (default 1 click/second/IP).
